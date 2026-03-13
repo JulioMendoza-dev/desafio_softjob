@@ -1,5 +1,6 @@
 const { Pool } = require("pg");
 const jwt = require("jsonwebtoken");
+const bcrypt = require("bcryptjs");
 
 const pool = new Pool({
   host: "localhost",
@@ -8,12 +9,14 @@ const pool = new Pool({
   database: "softjobs",
   allowExitOnIdle: true,
 });
-
 //Registrar y obtener usuarios de la base                                                                        de dato
-
 //Permitir el registro de nuevos usuarios a través de una ruta POST /usuarios
 const registrarUsuario = async (email, password, rol, lenguage) => {
   try {
+    const existeUsuario = await obtenerUsuarioPorEmail(email);
+    if (existeUsuario) {
+      throw { code: 400, message: "El usuario ya existe!" };
+    }
     const saltRounds = 10; // número de rondas de encriptación
     const hashedPassword = await bcrypt.hash(password, saltRounds);
     const consulta = `INSERT INTO usuarios (email, password, rol, lenguage) VALUES ($1, $2, $3, $4)`;
@@ -23,54 +26,33 @@ const registrarUsuario = async (email, password, rol, lenguage) => {
     return { email };
   } catch (error) {
     console.error("Error al registrar usuario:", error);
-    throw { code: 500, message: "Error al registrar usuario" };
+    throw error;
   }
 };
-//Login de usuario con la ruta POST /login
+
 const loginUsuario = async (email, password) => {
-  const consulta = `SELECT * from usuarios WHERE email = $1 AND password = $2`;
-  const values = [email, password];
-  const { rowCount } = await pool.query(consulta, values);
-  if (!rowCount)
-    throw {
-      code: 404,
-      message: "Credenciales incorrectas",
-    };
+  const usuario = await obtenerUsuarioPorEmail(email);
+  if (!usuario) {
+    throw { code: 400, message: "usuario no existe" };
+  }
+  //Comparamos la clave recibida con la encriptada de la DB
+  // bcrypt.compare devuelve true o false
+  const passwordEsCorrecta = await bcrypt.compare(password, usuario.password);
+  if (!passwordEsCorrecta) {
+    throw { code: 401, message: "Contraseña incorrecta" };
+  }
+  //Si todo está bien, generamos el token
   const token = jwt.sign({ email }, "secreto");
   return token;
 };
 
-/*Disponibilizar una ruta GET /usuarios para devolver los datos de un usuario en caso
-de que esté autenticado, para esto:
-○ Extraiga un token disponible en la propiedad Authorization de las cabeceras
-○ Verifique la validez del token usando la misma llave secreta usada en su firma
-○ Decodifique el token para obtener el email del usuario a buscar en su payload
-○ Obtenga y devuelva el registro del usuario
-*/
-const obtenerUsuario = async (id) => {
+//Obtener usuarios
+const obtenerUsuarioPorEmail = async (email) => {
   const { rows: usuarios } = await pool.query(
-    `SELECT * FROM usuarios WHERE id = $1`,
-    [id],
+    `SELECT * FROM usuarios WHERE email = $1`,
+    [email],
   );
   return usuarios[0];
-};
-
-//Verificar credenciales de usuario con la ruta POST /login
-const verificarCredenciales = async (email, password) => {
-  const consulta = `SELECT * FROM usuarios WHERE email = $1`;
-  const values = [email];
-  const { rows } = await pool.query(consulta, values);
-
-  if (!rows.length) {
-    throw { code: 404, message: "Credenciales incorrectas" };
-  }
-
-  const usuario = rows[0];
-  const passwordValida = await bcrypt.compare(password, usuario.password);
-
-  if (!passwordValida) {
-    throw { code: 404, message: "Credenciales incorrectas" };
-  }
 };
 
 //Eliminar usuario con la ruta DELETE /usuarios/:id
@@ -90,43 +72,32 @@ const actualizarUsuario = async (id, email, password, rol, lenguage) => {
   }
 };
 
-// Middleware para verificar credenciales
-const verificarCredencialesMiddleware = (req, res, next) => {
-  const { email, password } = req.body;
-  if (!email || !password) {
-    return res.status(400).send("Faltan credenciales");
+//Verificar credenciales de usuario con la ruta POST /login
+const verificarCredenciales = async (email, password) => {
+  const consulta = `SELECT * FROM usuarios WHERE email = $1`;
+  const values = [email];
+  //rows es el arreglo del objeto
+  const { rows, rowCount } = await pool.query(consulta, values);
+  //Si rowCount es 0, significa que el email no existe en la DB
+  if (rowCount === 0) {
+    throw { code: 404, message: "No hay usuario con estas credenciales" };
   }
-  next();
-};
-
-const validarTokenMiddleware = (req, res, next) => {
-  try {
-    const autorizacion = req.headers.authorization;
-    if (!autorizacion) throw new Error("Token no proporcionado");
-
-    const token = autorizacion.split("Bearer ")[1];
-    const payload = jwt.verify(token, "secreto");
-    req.email = payload.email; // guardar email en req
-    next();
-  } catch (error) {
-    res.status(401).send("Token inválido");
+  //Extraemos el usuario (el primer elemento del arreglo rows)
+  const usuario = rows[0];
+  //COMPARACIÓN: Usamos bcrypt para validar la contraseña
+  const passwordValida = await bcrypt.compare(password, usuario.password);
+  if (!passwordValida) {
+    throw { code: 401, message: "Contraseña incorrecta" };
   }
-};
-
-//Middleware global para loguear todas las consultas
-const loggerMiddleware = (req, res, next) => {
-  console.log(`${req.method} ${req.url} - Body:`, req.body);
-  next();
+  //Si todo está bien, retornamos el usuario (o sus datos básicos)
+  return usuario;
 };
 
 module.exports = {
   registrarUsuario,
   loginUsuario,
-  obtenerUsuario,
+  obtenerUsuarioPorEmail,
   verificarCredenciales,
   eliminarUsuario,
   actualizarUsuario,
-  verificarCredencialesMiddleware,
-  validarTokenMiddleware,
-  loggerMiddleware,
 };
